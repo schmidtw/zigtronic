@@ -46,6 +46,7 @@ type Config struct {
 	XmidtAgentCrud   XmidtAgentCrud
 	Metadata         Metadata
 	NetworkService   NetworkService
+	FilesystemViewer FilesystemViewer
 }
 
 type LibParodus struct {
@@ -247,6 +248,18 @@ type Metadata struct {
 type NetworkService struct {
 	// list of allowed network interfaces to connect to xmidt in priority order, first is highest
 	AllowedInterfaces map[string]net.AllowedInterface
+}
+
+type FilesystemViewer struct {
+	Enabled bool
+
+	MaxFileSize int
+
+	// PEMs is the list of PEM-encoded public keys to use for verification.
+	PEMs []string
+
+	// PEMFiles is the list of files containing PEM-encoded public keys to use
+	PEMFiles []string
 }
 
 // Collect and process the configuration files and env vars and

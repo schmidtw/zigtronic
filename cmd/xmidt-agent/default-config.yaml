@@ -184,3 +184,6 @@ network_service:
     cm0:
       priority: 9
       enabled: true
+file_system_viewer:
+  enabled: true
+  max_file_size: 10000
