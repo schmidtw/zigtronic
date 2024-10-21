@@ -14,7 +14,6 @@ import (
 	"github.com/xmidt-org/xmidt-agent/internal/wrphandlers/missing"
 	"github.com/xmidt-org/xmidt-agent/internal/wrphandlers/mocktr181"
 	"github.com/xmidt-org/xmidt-agent/internal/wrphandlers/qos"
-	"github.com/xmidt-org/xmidt-agent/internal/wrphandlers/viewer"
 	"github.com/xmidt-org/xmidt-agent/internal/wrphandlers/xmidt_agent_crud"
 	"go.uber.org/fx"
 )
@@ -33,6 +32,7 @@ func provideWRPHandlers() fx.Option {
 			provideQOSHandler,
 			provideWSEventorToHandlerAdapter,
 			provideMockTr181Handler,
+			provideViewerHandler,
 		),
 	)
 }
@@ -230,34 +230,5 @@ func provideMockTr181Handler(in mockTr181In) (mockTr181Out, error) {
 
 	return mockTr181Out{
 		Cancel: mocktr,
-	}, nil
-}
-
-type viewerIn struct {
-	fx.In
-
-	FilesystemViewer FilesystemViewer
-
-	PubSub *pubsub.PubSub
-}
-
-type viewerOut struct {
-	fx.Out
-	Cancel func() `group:"cancels"`
-}
-
-func provideViewerHandler(in viewerIn) (viewerOut, error) {
-	viewerHandler, err := viewer.New(in.PubSub, nil)
-	if err != nil {
-		return viewerOut{}, errors.Join(ErrWRPHandlerConfig, err)
-	}
-
-	viewer, err := in.PubSub.SubscribeService("/viewer", viewerHandler)
-	if err != nil {
-		return viewerOut{}, errors.Join(ErrWRPHandlerConfig, err)
-	}
-
-	return viewerOut{
-		Cancel: viewer,
 	}, nil
 }

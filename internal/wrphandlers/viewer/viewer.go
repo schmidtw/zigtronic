@@ -7,26 +7,30 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
-	"os"
+	"io/fs"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/xmidt-org/wrp-go/v3"
 	"github.com/xmidt-org/xmidt-agent/internal/wrpkit"
 )
 
-const maxFileSize = 1000
+const defaultMaxFileSize = 1000
 
 type Handler struct {
 	egress wrpkit.Handler
+	root   fs.FS
 	public []rsa.PublicKey
 }
 
 // New creates a new instance of the Handler struct.  The parameter egress is
 // the handler that will be called to send the response.  The parameter source is the source to use in
 // the response message. This handler handles crud messages specifically for xmdit-agent, only.
-func New(egress wrpkit.Handler, public []rsa.PublicKey) (*Handler, error) {
+func New(egress wrpkit.Handler, root fs.FS, public []rsa.PublicKey) (*Handler, error) {
 	h := Handler{
 		egress: egress,
+		root:   root,
 		public: public,
 	}
 
@@ -42,11 +46,26 @@ type FileInfo struct {
 	Name    string `json:"name"`
 	Size    int64  `json:"size"`
 	Mode    string `json:"mode"`
-	ModTime string `json:"touched"`
+	ModTime string `json:"mt"`
 }
 
-func isDir(path string) (bool, error) {
-	fileInfo, err := os.Stat(path)
+// FileInfoSlice is a type for a slice of FileInfo that implements sort.Interface
+type FileInfoSlice []FileInfo
+
+func (f FileInfoSlice) Len() int {
+	return len(f)
+}
+
+func (f FileInfoSlice) Less(i, j int) bool {
+	return f[i].Name < f[j].Name
+}
+
+func (f FileInfoSlice) Swap(i, j int) {
+	f[i], f[j] = f[j], f[i]
+}
+
+func (h *Handler) isDir(path string) (bool, error) {
+	fileInfo, err := fs.Stat(h.root, path)
 	if err != nil {
 		return false, err
 	}
@@ -54,8 +73,8 @@ func isDir(path string) (bool, error) {
 	return fileInfo.IsDir(), nil
 }
 
-func readDir(path string) ([]FileInfo, error) {
-	files, err := os.ReadDir(path)
+func (h *Handler) readDir(path string) ([]FileInfo, error) {
+	files, err := fs.ReadDir(h.root, path)
 	if err != nil {
 		return nil, err
 	}
@@ -77,8 +96,8 @@ func readDir(path string) ([]FileInfo, error) {
 	return fileInfos, nil
 }
 
-func readFile(path string, max int) ([]byte, error) {
-	file, err := os.Open(path)
+func (h *Handler) readFile(path string, max int) ([]byte, error) {
+	file, err := h.root.Open(path)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +134,7 @@ func (h *Handler) HandleWrp(msg wrp.Message) error {
 		goto done
 	}
 
-	err = processMsg(cmd, &response)
+	err = h.processMsg(cmd, &response)
 
 done:
 	if err != nil {
@@ -126,30 +145,35 @@ done:
 	return h.egress.HandleWrp(response)
 }
 
-func processMsg(cmd Command, resp *wrp.Message) error {
-	l, err := wrp.ParseLocator(cmd.Path)
-	if err != nil {
-		return err
+func (h *Handler) processMsg(cmd Command, resp *wrp.Message) error {
+
+	path := cmd.Path
+	path = strings.TrimSpace(path)
+
+	if path == "/" {
+		path = "."
 	}
-
-	path := l.Ignored
-
-	if path == "" {
+	path = strings.TrimPrefix(path, "/")
+	if !fs.ValidPath(path) {
 		return errors.New("invalid path")
 	}
 
-	dir, err := isDir(path)
+	dir, err := h.isDir(path)
 	if err != nil {
 		return err
 	}
 
 	if dir {
-		fileInfos, err := readDir(path)
+		fileInfos, err := h.readDir(path)
 		if err != nil {
 			return err
 		}
 
-		resp.Payload, err = json.Marshal(fileInfos)
+		// sort the fileInfos by name
+		list := FileInfoSlice(fileInfos)
+		sort.Sort(list)
+
+		resp.Payload, err = json.Marshal(list)
 		if err != nil {
 			return err
 		}
@@ -157,18 +181,17 @@ func processMsg(cmd Command, resp *wrp.Message) error {
 		return nil
 	}
 
-	size := maxFileSize
+	size := defaultMaxFileSize
 	if cmd.MaxSize > 0 {
 		size = cmd.MaxSize
 	}
 
-	buf, err := readFile(path, size)
+	buf, err := h.readFile(path, size)
 	if err != nil {
 		return err
 	}
 
 	resp.Payload = buf
 	resp.ContentType = "application/octet-stream"
-
-	return err
+	return nil
 }
