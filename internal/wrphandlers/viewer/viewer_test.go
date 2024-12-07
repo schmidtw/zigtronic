@@ -4,116 +4,174 @@
 package viewer
 
 import (
+	"encoding/json"
 	"io/fs"
+	"os/user"
+	"strconv"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/xmidt-org/wrp-go/v3"
-)
-
-const (
-	aTxtContent = "a.txt content"
-	bTxtContent = "b.txt content is longer"
-	cTxtContent = "c.txt content"
-	fileContent = "This is a test file content."
-
-	aTxtInfo = `{` +
-		`"name":"a.txt",` +
-		`"mode":"-rw-r--r--",` +
-		`"size":13,` +
-		`"mt":"2021-01-01T00:00:00Z"` +
-		`}`
-
-	bTxtInfo = `{` +
-		`"name":"b.txt",` +
-		`"mode":"-rw-r--r--",` +
-		`"size":23,` +
-		`"mt":"2021-02-02T00:00:00Z"` +
-		`}`
-
-	cTxtInfo = `{` +
-		`"name":"c.txt",` +
-		`"mode":"-rw-r--r--",` +
-		`"size":13,` +
-		`"mt":"2022-02-02T00:00:00Z"` +
-		`}`
-
-	fileInfo = `{` +
-		`"name":"file.txt",` +
-		`"mode":"-rw-r--r--",` +
-		`"size":28,` +
-		`"mt":"2021-03-03T00:00:00Z"` +
-		`}`
-
-	dirInfo = `{` +
-		`"name":"dir",` +
-		`"mode":"dr-xr-xr-x",` +
-		`"size":0,` +
-		`"mt":"0001-01-01T00:00:00Z"` +
-		`}`
+	"github.com/stretchr/testify/require"
+	"github.com/xmidt-org/securly"
 )
 
 var testFS = fstest.MapFS{
 	"dir/c.txt": &fstest.MapFile{
-		Data:    []byte(cTxtContent),
+		Data:    []byte("c file content"),
 		Mode:    0644,
 		ModTime: time.Date(2022, 2, 2, 0, 0, 0, 0, time.UTC),
+		Sys: func() *syscall.Stat_t {
+			return &syscall.Stat_t{
+				Uid: getCurrentUID(),
+				Gid: getCurrentGID(),
+			}
+		}(),
 	},
 	"dir/a.txt": &fstest.MapFile{
-		Data:    []byte(aTxtContent),
+		Data:    []byte("a file content"),
 		Mode:    0644,
 		ModTime: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC),
 	},
 	"dir/b.txt": &fstest.MapFile{
-		Data:    []byte(bTxtContent),
+		Data:    []byte("b file content"),
 		Mode:    0644,
 		ModTime: time.Date(2021, 2, 2, 0, 0, 0, 0, time.UTC),
 	},
 	"file.txt": &fstest.MapFile{
-		Data:    []byte(fileContent),
+		Data:    []byte("file content"),
 		Mode:    0644,
 		ModTime: time.Date(2021, 3, 3, 0, 0, 0, 0, time.UTC),
 	},
 }
 
+func getCurrentGID() uint32 {
+	current, err := user.Current()
+	if err != nil {
+		// Not running on a system that supports user.Current()
+		return 0
+	}
+
+	gid, err := strconv.ParseUint(current.Gid, 10, 32)
+	if err != nil {
+		// This is just invalid.
+		panic(err)
+	}
+
+	if gid > uint64(^uint32(0)) {
+		// GID is too large to fit into a uint32
+		panic("GID is too large to fit into a uint32")
+	}
+
+	return uint32(gid) // nolint:gosec
+}
+
+func getCurrentUID() uint32 {
+	current, err := user.Current()
+	if err != nil {
+		// Not running on a system that supports user.Current()
+		return 0
+	}
+
+	uid, err := strconv.ParseUint(current.Uid, 10, 32)
+	if err != nil {
+		// This is just invalid.
+		panic(err)
+	}
+
+	return uint32(uid) // nolint:gosec
+}
+
+func getCurrentUser() string {
+	current, err := user.Current()
+	if err != nil {
+		// Not running on a system that supports user.Current()
+		return ""
+	}
+
+	return current.Name
+}
+
+func getCurrentGroup() string {
+	current, err := user.Current()
+	if err != nil {
+		// Not running on a system that supports user.Current()
+		return ""
+	}
+
+	grpInfo, err := user.LookupGroupId(current.Gid)
+	if err != nil {
+		return ""
+	}
+
+	return grpInfo.Name
+}
+
 func TestProcessMsg(t *testing.T) {
 	tests := []struct {
-		name        string
-		cmd         Command
-		expected    string
-		contentType string
-		err         error
+		name     string
+		cmd      Command
+		expected map[string]securly.File
+		err      error
 	}{
 		{
 			name: "Valid Directory",
 			cmd: Command{
 				Path: "/dir",
 			},
-			contentType: "application/json",
-			expected: `[` +
-				aTxtInfo + `,` +
-				bTxtInfo + `,` +
-				cTxtInfo +
-				`]`,
-		}, {
+			expected: map[string]securly.File{
+				"/dir/a.txt": {
+					Mode:    testFS["dir/a.txt"].Mode,
+					Size:    int64(len(testFS["dir/a.txt"].Data)),
+					ModTime: testFS["dir/a.txt"].ModTime,
+				},
+				"/dir/b.txt": {
+					Mode:    testFS["dir/b.txt"].Mode,
+					Size:    int64(len(testFS["dir/b.txt"].Data)),
+					ModTime: testFS["dir/b.txt"].ModTime,
+				},
+				"/dir/c.txt": {
+					Mode:    testFS["dir/c.txt"].Mode,
+					Size:    int64(len(testFS["dir/c.txt"].Data)),
+					ModTime: testFS["dir/c.txt"].ModTime,
+					UID:     getCurrentUID(),
+					Owner:   getCurrentUser(),
+					GID:     getCurrentGID(),
+					Group:   getCurrentGroup(),
+				},
+			},
+		},
+		{
 			name: "Valid (Root) Directory",
 			cmd: Command{
 				Path: "/",
 			},
-			contentType: "application/json",
-			expected: `[` +
-				dirInfo + `,` +
-				fileInfo +
-				`]`,
-		}, {
-			name:        "Valid File",
-			contentType: "application/octet-stream",
+			expected: map[string]securly.File{
+				"/dir": {
+					Mode: 0555 | fs.ModeDir,
+				},
+				"/file.txt": {
+					Mode:    testFS["file.txt"].Mode,
+					Size:    int64(len(testFS["file.txt"].Data)),
+					ModTime: testFS["file.txt"].ModTime,
+				},
+			},
+		},
+		{
+			name: "Valid File",
 			cmd: Command{
 				Path: "/dir/a.txt",
 			},
-			expected: aTxtContent,
+			expected: map[string]securly.File{
+				"/dir/a.txt": {
+					Mode:    testFS["dir/a.txt"].Mode,
+					Size:    int64(len(testFS["dir/a.txt"].Data)),
+					ModTime: testFS["dir/a.txt"].ModTime,
+					Data:    testFS["dir/a.txt"].Data,
+				},
+			},
 		}, {
 			name: "Invalid Path",
 			cmd: Command{
@@ -125,30 +183,33 @@ func TestProcessMsg(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp := &wrp.Message{}
+			assert := assert.New(t)
+			require := require.New(t)
+
 			h := Handler{
 				root: testFS,
 			}
-			err := h.processMsg(tt.cmd, resp)
+
+			cmd, err := json.Marshal(tt.cmd)
+			require.NoError(err)
+
+			got, err := h.processMsg(cmd)
 			if tt.err != nil {
-				assert.ErrorIs(t, err, tt.err)
-				assert.Empty(t, resp.Payload)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.contentType, resp.ContentType)
-				switch tt.contentType {
-				case "application/json":
-					assert.JSONEq(t, tt.expected, string(resp.Payload))
-				default:
-					assert.Equal(t, tt.expected, string(resp.Payload))
-				}
+				assert.ErrorIs(err, tt.err)
+				assert.Nil(got)
+				return
 			}
+
+			require.NoError(err)
+			require.NotNil(got)
+			assert.Equal(tt.expected, got)
 		})
 	}
 }
 
 /*
 func TestHandleWrp(t *testing.T) {
+
 	tests := []struct {
 		name     string
 		msg      wrp.Message
@@ -160,7 +221,7 @@ func TestHandleWrp(t *testing.T) {
 			msg: wrp.Message{
 				Source:      "source",
 				Destination: "destination",
-				ContentType: "application/json",
+				ContentType: securly.SignedContentType,
 				Payload:     []byte(`{"path":"/valid/directory","max_size":0}`),
 			},
 			expected: wrp.Message{
